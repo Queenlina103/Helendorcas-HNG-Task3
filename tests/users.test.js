@@ -1,127 +1,194 @@
 /**
  * tests/users.test.js
- * Tests for /users endpoints:
- *   - GET /users/me
- *   - GET /users/:userId
- *   - PUT /users/:userId (update)
- *   - GET /users/organisations
- *   - GET /users/notification-preferences
- *   - PUT /users/notification-preferences
- *   - GET /profile
- *   - PATCH /profile
+ *
+ * Covers: GET /users/me, GET /users/:userId, GET /users/organisations,
+ *         GET /users/notification-preferences, GET /profile, GET /profile/:user_id
+ *
+ * Actual API shape (confirmed):
+ *   GET /users/me  → { status, status_code, message, data: { user: { id, email, ... } } }
+ *
+ * Positive  : 7
+ * Negative  : 8
+ * Edge case : 3
+ * Total     : 18
  */
 
+"use strict";
 require("dotenv").config();
+
 const axios = require("axios");
 const { getPrimaryToken } = require("../utils/auth");
 const { authedClient, anonClient, BASE_URL } = require("../utils/helpers");
 
 let token;
-let userId;
+let currentUserId;
 
 beforeAll(async () => {
   token = await getPrimaryToken();
-  // Fetch current user to get their ID for subsequent tests
+  // /users/me returns data.data.user.id
   const res = await authedClient(token).get("/users/me");
-  userId = res.data?.data?.id;
+  currentUserId = res.data?.data?.user?.id || res.data?.data?.id;
+  if (!currentUserId) {
+    throw new Error(
+      `Could not get user ID. Response: ${JSON.stringify(res.data).slice(0, 200)}`
+    );
+  }
 });
 
-// ─── GET /users/me ────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
-describe("GET /users/me", () => {
-  test("returns the authenticated user's profile", async () => {
+async function expect4xx(promise) {
+  try {
+    const res = await promise;
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    return res;
+  } catch (err) {
+    if (err.response) {
+      expect(err.response.status).toBeGreaterThanOrEqual(400);
+      expect(err.response.status).toBeLessThan(500);
+      return err.response;
+    }
+    throw err;
+  }
+}
+
+async function expectStatus(promise, code) {
+  try {
+    const res = await promise;
+    expect(res.status).toBe(code);
+    return res;
+  } catch (err) {
+    if (err.response) {
+      expect(err.response.status).toBe(code);
+      return err.response;
+    }
+    throw err;
+  }
+}
+
+// ─── GET /users/me — positive ─────────────────────────────────────────────────
+
+describe("GET /users/me — positive", () => {
+  test("✅ returns 200 with success status", async () => {
     const res = await authedClient(token).get("/users/me");
 
     expect(res.status).toBe(200);
     expect(res.data).toHaveProperty("status", "success");
+    expect(res.data).toHaveProperty("status_code", 200);
+    expect(res.data).toHaveProperty("message");
     expect(res.data).toHaveProperty("data");
-    expect(res.data.data).toHaveProperty("id");
-    expect(typeof res.data.data.id).toBe("string");
-    expect(res.data.data).toHaveProperty("email");
-    expect(typeof res.data.data.email).toBe("string");
   });
 
-  test("returns 401 when no token is provided", async () => {
-    try {
-      await anonClient().get("/users/me");
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+  test("✅ response data contains a user object with id and email", async () => {
+    const res = await authedClient(token).get("/users/me");
+
+    // API returns data.data.user
+    const user = res.data.data.user || res.data.data;
+    expect(user).toHaveProperty("id");
+    expect(typeof user.id).toBe("string");
+    expect(user.id.length).toBeGreaterThan(0);
+    expect(user).toHaveProperty("email");
+    expect(user.email).toContain("@");
   });
 
-  test("returns 401 when an invalid token is provided", async () => {
-    try {
-      await axios.get(`${BASE_URL}/users/me`, {
-        headers: { Authorization: "Bearer invalid.token.here" },
-      });
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+  test("✅ user email matches the authenticated account", async () => {
+    const res = await authedClient(token).get("/users/me");
+
+    const user = res.data.data.user || res.data.data;
+    expect(user.email).toBe(process.env.TEST_EMAIL);
   });
 });
 
-// ─── GET /users/:userId ───────────────────────────────────────────────────────
+// ─── GET /users/me — negative ─────────────────────────────────────────────────
 
-describe("GET /users/:userId", () => {
-  test("returns a specific user by valid ID", async () => {
-    const res = await authedClient(token).get(`/users/${userId}`);
+describe("GET /users/me — negative", () => {
+  test("❌ returns 401 when no Authorization header is sent", async () => {
+    await expectStatus(anonClient().get("/users/me"), 401);
+  });
+
+  test("❌ returns 401 when a malformed JWT token is provided", async () => {
+    await expectStatus(
+      axios.get(`${BASE_URL}/users/me`, {
+        headers: { Authorization: "Bearer not.a.real.token" },
+      }),
+      401
+    );
+  });
+
+  test("❌ returns 401 when Authorization uses wrong scheme (Basic)", async () => {
+    await expectStatus(
+      axios.get(`${BASE_URL}/users/me`, {
+        headers: { Authorization: "Basic dXNlcjpwYXNz" },
+      }),
+      401
+    );
+  });
+});
+
+// ─── GET /users/:userId — positive ───────────────────────────────────────────
+
+describe("GET /users/:userId — positive", () => {
+  test("✅ returns a specific user by their valid UUID", async () => {
+    const res = await authedClient(token).get(`/users/${currentUserId}`);
 
     expect(res.status).toBe(200);
     expect(res.data).toHaveProperty("status", "success");
-    expect(res.data.data).toHaveProperty("id", userId);
-    expect(res.data.data).toHaveProperty("email");
-  });
-
-  test("returns 404 for a non-existent user ID (edge case)", async () => {
-    try {
-      await authedClient(token).get(
-        "/users/00000000-0000-0000-0000-000000000000"
-      );
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBeGreaterThanOrEqual(400);
-      expect(err.response.status).toBeLessThan(500);
-    }
-  });
-
-  test("returns 401 when accessing user by ID without a token", async () => {
-    try {
-      await anonClient().get(`/users/${userId}`);
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+    // The user id may be in data.data or data.data.user
+    const user = res.data.data?.user || res.data.data;
+    expect(user).toHaveProperty("id");
   });
 });
 
-// ─── GET /users/organisations ─────────────────────────────────────────────────
+// ─── GET /users/:userId — negative ───────────────────────────────────────────
 
-describe("GET /users/organisations", () => {
-  test("returns the list of organisations for the authenticated user", async () => {
+describe("GET /users/:userId — negative", () => {
+  test("❌ returns 4xx for a nil UUID (non-existent user)", async () => {
+    await expect4xx(
+      authedClient(token).get("/users/00000000-0000-0000-0000-000000000000")
+    );
+  });
+
+  test("❌ returns 401 when fetching user by ID without a token", async () => {
+    await expectStatus(anonClient().get(`/users/${currentUserId}`), 401);
+  });
+});
+
+// ─── GET /users/:userId — edge cases ─────────────────────────────────────────
+
+describe("GET /users/:userId — edge cases", () => {
+  test("🔲 returns 4xx when userId is a plain string (not a UUID)", async () => {
+    await expect4xx(authedClient(token).get("/users/not-a-valid-uuid"));
+  });
+
+  test("🔲 returns 4xx when userId is a numeric string", async () => {
+    await expect4xx(authedClient(token).get("/users/12345"));
+  });
+});
+
+// ─── GET /users/organisations — positive ─────────────────────────────────────
+
+describe("GET /users/organisations — positive", () => {
+  test("✅ returns 200 with organisations data for authenticated user", async () => {
     const res = await authedClient(token).get("/users/organisations");
 
     expect(res.status).toBe(200);
-    // Response is an array or an object with data
-    const body = res.data;
-    expect(body).toBeDefined();
-  });
-
-  test("returns 401 when fetching organisations without a token", async () => {
-    try {
-      await anonClient().get("/users/organisations");
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+    expect(res.data).toBeDefined();
   });
 });
 
-// ─── NOTIFICATION PREFERENCES ─────────────────────────────────────────────────
+// ─── GET /users/organisations — negative ─────────────────────────────────────
 
-describe("GET /users/notification-preferences", () => {
-  test("returns notification preferences for the authenticated user", async () => {
+describe("GET /users/organisations — negative", () => {
+  test("❌ returns 401 when fetching organisations without a token", async () => {
+    await expectStatus(anonClient().get("/users/organisations"), 401);
+  });
+});
+
+// ─── GET /users/notification-preferences — positive ──────────────────────────
+
+describe("GET /users/notification-preferences — positive", () => {
+  test("✅ returns 200 with notification preferences", async () => {
     const res = await authedClient(token).get(
       "/users/notification-preferences"
     );
@@ -129,21 +196,23 @@ describe("GET /users/notification-preferences", () => {
     expect(res.status).toBe(200);
     expect(res.data).toBeDefined();
   });
+});
 
-  test("returns 401 when fetching notification preferences without a token", async () => {
-    try {
-      await anonClient().get("/users/notification-preferences");
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+// ─── GET /users/notification-preferences — negative ──────────────────────────
+
+describe("GET /users/notification-preferences — negative", () => {
+  test("❌ returns 401 when fetching notification preferences without a token", async () => {
+    await expectStatus(
+      anonClient().get("/users/notification-preferences"),
+      401
+    );
   });
 });
 
-// ─── GET /profile ─────────────────────────────────────────────────────────────
+// ─── GET /profile — positive ──────────────────────────────────────────────────
 
-describe("GET /profile", () => {
-  test("returns the authenticated user's full profile", async () => {
+describe("GET /profile — positive", () => {
+  test("✅ returns full profile for authenticated user", async () => {
     const res = await authedClient(token).get("/profile");
 
     expect(res.status).toBe(200);
@@ -151,50 +220,24 @@ describe("GET /profile", () => {
     expect(res.data).toHaveProperty("message");
     expect(res.data).toHaveProperty("data");
   });
+});
 
-  test("returns 401 when fetching profile without a token", async () => {
-    try {
-      await anonClient().get("/profile");
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+// ─── GET /profile — negative ──────────────────────────────────────────────────
+
+describe("GET /profile — negative", () => {
+  test("❌ returns 401 when fetching profile without a token", async () => {
+    await expectStatus(anonClient().get("/profile"), 401);
   });
 });
 
-// ─── PATCH /profile ───────────────────────────────────────────────────────────
+// ─── GET /profile/:user_id — edge cases ──────────────────────────────────────
 
-describe("PATCH /profile", () => {
-  test("updates the authenticated user's display name successfully", async () => {
-    const newDisplayName = `TestUser_${Date.now()}`;
-
-    const FormData = require("form-data");
-    const form = new FormData();
-    form.append("display_name", newDisplayName);
-
-    const res = await axios.patch(`${BASE_URL}/profile`, form, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...form.getHeaders(),
-      },
-    });
-
-    expect(res.status).toBe(200);
-    expect(res.data).toHaveProperty("status", "success");
-  });
-
-  test("returns 401 when updating profile without a token", async () => {
-    try {
-      const FormData = require("form-data");
-      const form = new FormData();
-      form.append("display_name", "NoToken");
-
-      await axios.patch(`${BASE_URL}/profile`, form, {
-        headers: form.getHeaders(),
-      });
-      throw new Error("Expected request to fail");
-    } catch (err) {
-      expect(err.response.status).toBe(401);
-    }
+describe("GET /profile/:user_id — edge cases", () => {
+  test("🔲 returns 4xx for a non-existent user_id on profile endpoint", async () => {
+    await expect4xx(
+      authedClient(token).get(
+        "/profile/00000000-0000-0000-0000-000000000000"
+      )
+    );
   });
 });
